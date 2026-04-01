@@ -26,6 +26,7 @@ OSV_VULN_URL  = "https://api.osv.dev/v1/vulns"
 SLACK_WEBHOOK = os.environ["SLACK_WEBHOOK_URL"]
 PACKAGES_FILE = Path("packages.json")
 CACHE_FILE   = Path("cache.json")
+BATCH_SIZE   = 500
 DEDUP_HOURS  = 24 * 7
 DRY_RUN       = "--dry-run" in sys.argv
 
@@ -51,13 +52,22 @@ def batch_query(packages):
         {"version": p["version"], "package": {"name": p["name"], "ecosystem": "npm"}}
         for p in packages
     ]
-    try:
-        res = requests.post(OSV_BATCH_URL, json={"queries": queries}, timeout=30)
-        res.raise_for_status()
-        results = res.json().get("results", [])
-    except requests.RequestException as e:
-        print(f"[snitch] ERROR: OSV batch query failed: {e}")
-        return []
+    results = []
+
+    for i in range(0, len(queries), BATCH_SIZE):
+        chunk = queries[i:i + BATCH_SIZE]
+        chunk_idx = (i // BATCH_SIZE) + 1
+        total_chunks = (len(queries) + BATCH_SIZE - 1) // BATCH_SIZE
+        print(f"[snitch] OSV chunk {chunk_idx}/{total_chunks} ({len(chunk)} queries)")
+        try:
+            res = requests.post(OSV_BATCH_URL, json={"queries": chunk}, timeout=30)
+            res.raise_for_status()
+            chunk_results = res.json().get("results", [])
+        except requests.RequestException as e:
+            print(f"[snitch] ERROR: OSV batch query failed on chunk {chunk_idx}: {e}")
+            return []
+        results.extend(chunk_results)
+
     print(f"[snitch] OSV responded OK")
     return results
 

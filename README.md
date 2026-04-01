@@ -72,3 +72,14 @@ node scripts/export-packages.mjs --manager bun --out packages.json
 Notes:
 - Bun uses `bun list --all` text output; parsing is best-effort based on `name@version` tokens.
 - npm/pnpm/yarn modes consume JSON output from their respective CLIs.
+
+## Test exporter across managers
+
+Run real integration tests (npm, pnpm, yarn, bun):
+
+```bash
+node tests/run-real-exporter-tests.mjs
+```
+
+This creates temporary installs from `tests/projects/*`, runs the exporter, and validates
+that output is exact-version `{name, version}` entries.

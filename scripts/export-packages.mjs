@@ -136,25 +136,36 @@ function collectFromNodes(nodes) {
     out.push({ name, version });
   }
 
-  function walk(node) {
+  function walk(node, isRoot = false) {
     if (!node || typeof node !== "object") return;
 
-    if (typeof node.name === "string" && typeof node.version === "string") {
+    if (!isRoot && typeof node.name === "string" && typeof node.version === "string") {
       add(node.name, node.version);
     }
 
+    const deps = node.dependencies;
+    if (deps && typeof deps === "object" && !Array.isArray(deps)) {
+      for (const [depName, depNode] of Object.entries(deps)) {
+        const depVersion = depNode && depNode.version;
+        if (isExactVersion(depVersion)) {
+          add(depName, depVersion);
+        }
+        walk(depNode, false);
+      }
+    }
+
     if (Array.isArray(node)) {
-      for (const item of node) walk(item);
+      for (const item of node) walk(item, isRoot);
       return;
     }
 
-    if (node.name && typeof node.name === "string") {
+    if (!isRoot && node.name && typeof node.name === "string") {
       const parsed = parseNameVersionSpec(node.name);
       if (parsed) add(parsed.name, parsed.version);
     }
 
     for (const value of Object.values(node)) {
-      if (value && typeof value === "object") walk(value);
+      if (value && typeof value === "object") walk(value, false);
     }
   }
 
@@ -212,8 +223,13 @@ function loadPnpmPackages() {
 }
 
 function loadYarnPackages() {
-  const events = runJsonCommand("yarn", ["list", "--json"], true);
-  return collectFromNodes(events);
+  try {
+    const events = runJsonCommand("yarn", ["list", "--json"], true);
+    return collectFromNodes(events);
+  } catch (_error) {
+    const events = runJsonCommand("corepack", ["yarn", "list", "--json"], true);
+    return collectFromNodes(events);
+  }
 }
 
 function loadBunPackages() {
