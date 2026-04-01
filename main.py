@@ -25,6 +25,8 @@ OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 OSV_VULN_URL  = "https://api.osv.dev/v1/vulns"
 SLACK_WEBHOOK = os.environ["SLACK_WEBHOOK_URL"]
 PACKAGES_FILE = Path("packages.json")
+CACHE_FILE   = Path("cache.json")
+DEDUP_HOURS  = 24 * 7
 DRY_RUN       = "--dry-run" in sys.argv
 
 # ─── Core Functions ──────────────────────────────────────────────────────────
@@ -114,6 +116,46 @@ def find_safe_version(vuln):
     return None
 
 
+def load_cache():
+    try:
+        cache = json.loads(CACHE_FILE.read_text())
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"[snitch] ERROR: Failed to parse {CACHE_FILE}: {e}. Using empty cache.")
+        return {}
+    if not isinstance(cache, dict):
+        print(f"[snitch] ERROR: Invalid {CACHE_FILE} format. Using empty cache.")
+        return {}
+    print(f"[snitch] Loaded {len(cache)} cache entries")
+    return cache
+
+
+def save_cache(cache):
+    CACHE_FILE.write_text(json.dumps(cache, indent=2, sort_keys=True))
+
+
+def cache_key(package, vuln_id):
+    return f"{package['name']}@{package['version']}::{vuln_id}"
+
+
+def check_cache_for_duplicate(key, cache, cooldown_hours=DEDUP_HOURS):
+    last_sent = cache.get(key)
+    if not last_sent:
+        return False
+
+    cooldown_seconds = cooldown_hours * 3600
+    age_seconds = int(time.time()) - int(last_sent)
+    if age_seconds < cooldown_seconds:
+        return True
+
+    return False
+
+
+def mark_cache_sent(key, cache):
+    cache[key] = int(time.time())
+    save_cache(cache)
+
 def send_slack_alert(package, vuln, severity, safe_version):
     is_mal = vuln.get("id", "").startswith("MAL-")
 
@@ -136,7 +178,7 @@ def send_slack_alert(package, vuln, severity, safe_version):
         print("─" * 60)
         print(message)
         print("─" * 60)
-        return
+        return True
 
     print(f"[snitch] Sending Slack alert for {vuln['id']}...")
     try:
@@ -144,14 +186,16 @@ def send_slack_alert(package, vuln, severity, safe_version):
         res.raise_for_status()
     except requests.RequestException as e:
         print(f"[snitch] ERROR: Slack alert failed for {vuln['id']}: {e}")
-        return
+        return False
     print(f"[snitch] Slack alert sent")
+    return True
 
 
 # ─── Main Check ──────────────────────────────────────────────────────────────
 
 def check():
     print(f"\n[snitch] Starting check {'(DRY RUN)' if DRY_RUN else ''}...")
+    cache = load_cache()
     packages = read_packages()
     if not packages:
         print("[snitch] No packages to check, skipping.")
@@ -173,11 +217,19 @@ def check():
 
         for vuln_id in vuln_ids:
             try:
+                key = cache_key(package, vuln_id)
+                if check_cache_for_duplicate(key, cache):
+                    print(f"[snitch] Duplicate alert skipped: {key}")
+                    continue
+
                 vuln         = get_full_details(vuln_id)
                 severity     = derive_severity(vuln)
                 safe_version = find_safe_version(vuln)
-                send_slack_alert(package, vuln, severity, safe_version)
-                total += 1
+                sent = send_slack_alert(package, vuln, severity, safe_version)
+                if sent:
+                    total += 1
+                    if not DRY_RUN:
+                        mark_cache_sent(key, cache)
                 time.sleep(0.2)
             except Exception as e:
                 print(f"[snitch] Error processing {vuln_id}: {e}")
