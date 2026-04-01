@@ -46,3 +46,29 @@ Malicious packages (`MAL-` IDs) are flagged separately with instructions to remo
 ```
 
 Works with npm, pnpm, bun, and yarn.
+
+## Generate `packages.json` (npm/pnpm/yarn/bun)
+
+To build a scanner-ready merged list with exact resolved versions:
+
+```bash
+node scripts/export-packages.mjs --out packages.json
+```
+
+The script auto-detects package manager from lockfiles (`bun`, `pnpm`, `yarn`, `npm`), collects dependency trees, deduplicates by `name@version`, and writes:
+
+```json
+[
+  {"name": "axios", "version": "1.14.1"}
+]
+```
+
+You can also force a manager explicitly:
+
+```bash
+node scripts/export-packages.mjs --manager bun --out packages.json
+```
+
+Notes:
+- Bun uses `bun list --all` text output; parsing is best-effort based on `name@version` tokens.
+- npm/pnpm/yarn modes consume JSON output from their respective CLIs.
