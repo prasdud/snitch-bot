@@ -10,6 +10,7 @@ slack: package, severity, affected versions, recommended action
 import json
 import os
 import time
+import math
 from datetime import datetime, timezone
 import schedule
 import requests
@@ -232,6 +233,25 @@ def create_run_thread(packages_count):
     sent, ts = post_slack_message(message)
     return ts if sent else None
 
+
+def send_scan_complete_summary(metrics):
+    duration_seconds = metrics["duration_seconds"]
+    minutes, seconds = divmod(int(duration_seconds), 60)
+    duration_display = f"{minutes:02d}:{seconds:02d}"
+
+    message = (
+        "✅ *Snitch Scan Complete*\n"
+        f"*Started:* {metrics['started_at']}\n"
+        f"*Duration:* {duration_display}\n"
+        f"*Packages:* total={metrics['packages_total']} affected={metrics['affected_packages']} clean={metrics['clean_packages']}\n"
+        f"*Severity:* C={metrics['severity_counts']['CRITICAL']} H={metrics['severity_counts']['HIGH']} M={metrics['severity_counts']['MEDIUM']} L={metrics['severity_counts']['LOW']} U={metrics['severity_counts']['UNKNOWN']}\n"
+        f"*Alerts:* sent={metrics['alerts_sent']} skipped={metrics['alerts_skipped']} failed={metrics['alerts_failed']}\n"
+        f"*OSV:* batch_calls={metrics['osv_batch_calls']} detail_fetches={metrics['osv_detail_fetches']}"
+    )
+    sent, _ = post_slack_message(message)
+    if not sent:
+        print("[snitch] ERROR: Failed to send scan complete summary")
+
 def send_slack_alert(package, vuln, severity, safe_version):
     is_mal = vuln.get("id", "").startswith("MAL-")
 
@@ -265,6 +285,7 @@ send_slack_alert.thread_ts = None
 
 def check():
     print(f"\n[snitch] Starting check {'(DRY RUN)' if DRY_RUN else ''}...")
+    started_at = datetime.now(timezone.utc)
     cache = load_cache()
     packages = read_packages()
     if not packages:
@@ -274,8 +295,21 @@ def check():
     if not results:
         print("[snitch] No results from OSV, skipping.")
         return
+
+    osv_batch_calls = math.ceil(len(packages) / BATCH_SIZE)
     send_slack_alert.thread_ts = create_run_thread(len(packages))
     total    = 0
+    skipped_total = 0
+    failed_total = 0
+    affected_packages = 0
+    severity_counts = {
+        "CRITICAL": 0,
+        "HIGH": 0,
+        "MEDIUM": 0,
+        "LOW": 0,
+        "UNKNOWN": 0,
+    }
+    osv_detail_fetches = 0
 
     for package, result in zip(packages, results):
         vuln_ids = [v["id"] for v in result.get("vulns", [])]
@@ -284,6 +318,8 @@ def check():
             # print(f"[snitch] {package['name']}@{package['version']} → clean")
             continue
 
+        affected_packages += 1
+
         print(f"[snitch] {package['name']}@{package['version']} → {len(vuln_ids)} vuln(s) found")
 
         for vuln_id in vuln_ids:
@@ -291,19 +327,46 @@ def check():
                 key = cache_key(package, vuln_id)
                 if check_cache_for_duplicate(key, cache):
                     print(f"[snitch] Duplicate alert skipped: {key}")
+                    skipped_total += 1
                     continue
 
                 vuln         = get_full_details(vuln_id)
+                osv_detail_fetches += 1
                 severity     = derive_severity(vuln)
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+                elif severity == "MODERATE":
+                    severity_counts["MEDIUM"] += 1
+                else:
+                    severity_counts["UNKNOWN"] += 1
                 safe_version = find_safe_version(vuln)
                 sent = send_slack_alert(package, vuln, severity, safe_version)
                 if sent:
                     total += 1
                     # if not DRY_RUN:
                     mark_cache_sent(key, cache)
+                else:
+                    failed_total += 1
                 time.sleep(0.2)
             except Exception as e:
                 print(f"[snitch] Error processing {vuln_id}: {e}")
+                failed_total += 1
+
+    clean_packages = len(packages) - affected_packages
+    metrics = {
+        "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "duration_seconds": time.time() - started_at.timestamp(),
+        "packages_total": len(packages),
+        "affected_packages": affected_packages,
+        "clean_packages": clean_packages,
+        "severity_counts": severity_counts,
+        "alerts_sent": total,
+        "alerts_skipped": skipped_total,
+        "alerts_failed": failed_total,
+        "osv_batch_calls": osv_batch_calls,
+        "osv_detail_fetches": osv_detail_fetches,
+    }
+    send_scan_complete_summary(metrics)
 
     print(f"[snitch] Check complete. {total} alert(s) sent.\n")
 
