@@ -10,6 +10,7 @@ slack: package, severity, affected versions, recommended action
 import json
 import os
 import time
+from datetime import datetime, timezone
 import schedule
 import requests
 import sys
@@ -24,6 +25,8 @@ load_dotenv()
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 OSV_VULN_URL  = "https://api.osv.dev/v1/vulns"
 SLACK_WEBHOOK = os.environ["SLACK_WEBHOOK_URL"]
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
 PACKAGES_FILE = Path("packages.json")
 CACHE_FILE   = Path("cache.json")
 BATCH_SIZE   = 500
@@ -166,6 +169,69 @@ def mark_cache_sent(key, cache):
     cache[key] = int(time.time())
     save_cache(cache)
 
+
+def post_slack_message(message, thread_ts=None):
+    if DRY_RUN:
+        print(f"[snitch] DRY RUN — Slack message would be:\n")
+        print("─" * 60)
+        print(message)
+        if thread_ts:
+            print(f"[thread_ts: {thread_ts}]")
+        print("─" * 60)
+        return True, None
+
+    if SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
+        payload = {
+            "channel": SLACK_CHANNEL_ID,
+            "text": message,
+        }
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+
+        try:
+            res = requests.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={
+                    "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json=payload,
+                timeout=10,
+            )
+            res.raise_for_status()
+            data = res.json()
+            if not data.get("ok"):
+                print(f"[snitch] ERROR: Slack API error: {data.get('error', 'unknown_error')}")
+                return False, None
+            return True, data.get("ts")
+        except requests.RequestException as e:
+            print(f"[snitch] ERROR: Slack API request failed: {e}")
+            return False, None
+
+    payload = {"text": message}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+
+    try:
+        res = requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
+        res.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[snitch] ERROR: Slack webhook failed: {e}")
+        return False, None
+    return True, None
+
+
+def create_run_thread(packages_count):
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    message = (
+        "🧵 *Snitch Scan Started*\n"
+        f"*Started:* {started_at}\n"
+        f"*Packages:* {packages_count}\n"
+        f"*Mode:* {'DRY RUN' if DRY_RUN else 'LIVE'}"
+    )
+    sent, ts = post_slack_message(message)
+    return ts if sent else None
+
 def send_slack_alert(package, vuln, severity, safe_version):
     is_mal = vuln.get("id", "").startswith("MAL-")
 
@@ -183,22 +249,16 @@ def send_slack_alert(package, vuln, severity, safe_version):
         f"*Action:* {action}"
     )
 
-    if DRY_RUN:
-        print(f"[snitch] DRY RUN — Slack message would be:\n")
-        print("─" * 60)
-        print(message)
-        print("─" * 60)
-        return True
-
     print(f"[snitch] Sending Slack alert for {vuln['id']}...")
-    try:
-        res = requests.post(SLACK_WEBHOOK, json={"text": message}, timeout=10)
-        res.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[snitch] ERROR: Slack alert failed for {vuln['id']}: {e}")
+    sent, _ = post_slack_message(message, thread_ts=send_slack_alert.thread_ts)
+    if not sent:
+        print(f"[snitch] ERROR: Slack alert failed for {vuln['id']}")
         return False
     print(f"[snitch] Slack alert sent")
     return True
+
+
+send_slack_alert.thread_ts = None
 
 
 # ─── Main Check ──────────────────────────────────────────────────────────────
@@ -214,6 +274,7 @@ def check():
     if not results:
         print("[snitch] No results from OSV, skipping.")
         return
+    send_slack_alert.thread_ts = create_run_thread(len(packages))
     total    = 0
 
     for package, result in zip(packages, results):
