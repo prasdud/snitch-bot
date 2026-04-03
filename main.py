@@ -184,10 +184,10 @@ def send_slack_alert(package, vuln, severity, safe_version):
     )
 
     if DRY_RUN:
-        # print(f"[snitch] DRY RUN — Slack message would be:\n")
-        # print("─" * 60)
-        # print(message)
-        # print("─" * 60)
+        print(f"[snitch] DRY RUN — Slack message would be:\n")
+        print("─" * 60)
+        print(message)
+        print("─" * 60)
         return True
 
     print(f"[snitch] Sending Slack alert for {vuln['id']}...")
@@ -238,8 +238,8 @@ def check():
                 sent = send_slack_alert(package, vuln, severity, safe_version)
                 if sent:
                     total += 1
-                    if not DRY_RUN:
-                        mark_cache_sent(key, cache)
+                    # if not DRY_RUN:
+                    mark_cache_sent(key, cache)
                 time.sleep(0.2)
             except Exception as e:
                 print(f"[snitch] Error processing {vuln_id}: {e}")
