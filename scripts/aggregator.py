@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parents[1] / 'output'
 files = [
     '1-packages.json',
     '2-packages.json',
+    '3-packages.json',
 ]
 
 # core

@@ -184,10 +184,10 @@ def send_slack_alert(package, vuln, severity, safe_version):
     )
 
     if DRY_RUN:
-        print(f"[snitch] DRY RUN — Slack message would be:\n")
-        print("─" * 60)
-        print(message)
-        print("─" * 60)
+        # print(f"[snitch] DRY RUN — Slack message would be:\n")
+        # print("─" * 60)
+        # print(message)
+        # print("─" * 60)
         return True
 
     print(f"[snitch] Sending Slack alert for {vuln['id']}...")
@@ -220,7 +220,7 @@ def check():
         vuln_ids = [v["id"] for v in result.get("vulns", [])]
 
         if not vuln_ids:
-            print(f"[snitch] {package['name']}@{package['version']} → clean")
+            # print(f"[snitch] {package['name']}@{package['version']} → clean")
             continue
 
         print(f"[snitch] {package['name']}@{package['version']} → {len(vuln_ids)} vuln(s) found")
