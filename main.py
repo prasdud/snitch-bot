@@ -147,6 +147,20 @@ def _severity_rank(severity):
     return ranks.get(normalized, 0)
 
 
+def _severity_badge(severity):
+    normalized = (severity or "UNKNOWN").upper()
+    if normalized == "MODERATE":
+        normalized = "MEDIUM"
+    badges = {
+        "CRITICAL": "🔴 CRITICAL",
+        "HIGH": "🟠 HIGH",
+        "MEDIUM": "🟡 MEDIUM",
+        "LOW": "🟢 LOW",
+        "UNKNOWN": "⚪ UNKNOWN",
+    }
+    return badges.get(normalized, "⚪ UNKNOWN")
+
+
 def _version_key(version):
     parts = re.split(r"[.+\-]", version)
     key = []
@@ -324,15 +338,26 @@ def send_scan_complete_summary(metrics):
     minutes, seconds = divmod(int(duration_seconds), 60)
     duration_display = f"{minutes:02d}:{seconds:02d}"
 
-    message = (
-        "✅ *Snitch Scan Complete*\n"
-        f"*Started:* {metrics['started_at']}\n"
-        f"*Duration:* {duration_display}\n"
-        f"*Packages:* total={metrics['packages_total']} affected={metrics['affected_packages']} clean={metrics['clean_packages']}\n"
-        f"*Severity:* C={metrics['severity_counts']['CRITICAL']} H={metrics['severity_counts']['HIGH']} M={metrics['severity_counts']['MEDIUM']} L={metrics['severity_counts']['LOW']} U={metrics['severity_counts']['UNKNOWN']}\n"
-        f"*Alerts:* sent={metrics['alerts_sent']} skipped={metrics['alerts_skipped']} failed={metrics['alerts_failed']}\n"
-        f"*OSV:* batch_calls={metrics['osv_batch_calls']} detail_fetches={metrics['osv_detail_fetches']}"
-    )
+    if metrics.get("no_changes"):
+        message = (
+            "✅ *Snitch Scan Complete*\n"
+            f"*Started:* {metrics['started_at']}\n"
+            f"*Duration:* {duration_display}\n"
+            f"*Packages:* total={metrics['packages_total']} affected={metrics['affected_packages']} clean={metrics['clean_packages']}\n"
+            "*Status:* no new alerts since last run\n"
+            f"*Alerts:* sent={metrics['alerts_sent']} skipped={metrics['alerts_skipped']} failed={metrics['alerts_failed']}\n"
+            f"*OSV:* batch_calls={metrics['osv_batch_calls']} detail_fetches={metrics['osv_detail_fetches']}"
+        )
+    else:
+        message = (
+            "✅ *Snitch Scan Complete*\n"
+            f"*Started:* {metrics['started_at']}\n"
+            f"*Duration:* {duration_display}\n"
+            f"*Packages:* total={metrics['packages_total']} affected={metrics['affected_packages']} clean={metrics['clean_packages']}\n"
+            f"*Severity:* C={metrics['severity_counts']['CRITICAL']} H={metrics['severity_counts']['HIGH']} M={metrics['severity_counts']['MEDIUM']} L={metrics['severity_counts']['LOW']} U={metrics['severity_counts']['UNKNOWN']}\n"
+            f"*Alerts:* sent={metrics['alerts_sent']} skipped={metrics['alerts_skipped']} failed={metrics['alerts_failed']}\n"
+            f"*OSV:* batch_calls={metrics['osv_batch_calls']} detail_fetches={metrics['osv_detail_fetches']}"
+        )
     sent, _ = post_slack_message(message)
     if not sent:
         print("[snitch] ERROR: Failed to send scan complete summary")
@@ -341,6 +366,7 @@ def send_slack_alert(package, vuln, severity, safe_version, vuln_count=None):
     is_mal = vuln.get("id", "").startswith("MAL-")
 
     emoji  = "🚨" if is_mal else "⚠️"
+    severity_display = _severity_badge(severity)
     action = "Do NOT downgrade — nuke it entirely. Rotate all secrets." if is_mal \
              else f"Upgrade to `{safe_version}`" if safe_version \
              else "No safe version found — check manually."
@@ -355,7 +381,7 @@ def send_slack_alert(package, vuln, severity, safe_version, vuln_count=None):
     message += (
         f"*ID:* {vuln['id']}\n"
         f"*Summary:* {vuln.get('summary', 'N/A')}\n"
-        f"*Severity:* {severity}\n"
+        f"*Severity:* {severity_display}\n"
         f"*Action:* {action}"
     )
 
@@ -474,6 +500,7 @@ def check():
         "alerts_failed": failed_total,
         "osv_batch_calls": osv_batch_calls,
         "osv_detail_fetches": osv_detail_fetches,
+        "no_changes": total == 0 and failed_total == 0 and skipped_total > 0,
     }
     send_scan_complete_summary(metrics)
 
