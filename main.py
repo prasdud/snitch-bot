@@ -22,6 +22,34 @@ from pathlib import Path
 
 load_dotenv()
 
+# ─── Function Definitions ───────────────────────────────────────────────────────────────
+
+__all__ = [
+    "check",
+    "load_cache",
+    "read_packages",
+    "batch_query",
+    "get_full_details",
+    "derive_severity",
+    "find_safe_version",
+    "clean_duplicate_vuln",
+    "save_scan_findings",
+    "save_deduped_alerts",
+    "cache_key",
+    "check_cache_for_duplicate",
+    "send_slack_alert",
+    "mark_cache_sent",
+    "send_scan_complete_summary",
+    "create_run_thread",
+    "post_slack_message",
+    "save_cache",
+    "load_scan_findings",
+    "_severity_rank",
+    "_severity_badge",
+    "_version_key",
+    "_find_fix_all_version",
+]
+
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
