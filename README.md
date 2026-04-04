@@ -6,13 +6,21 @@ Watches your `packages.json` for vulnerabilities and malicious packages using th
 
 ## How it works
 
-1. Reads `packages.json` — a list of `{name, version}` packages
-2. Batch queries OSV for known vulnerabilities
-3. For each vuln found, fetches full details and derives severity (CRITICAL / HIGH / MEDIUM / LOW)
-4. Finds the safe version to upgrade to
-5. Sends a Slack alert with the package, severity, and recommended action
+1. Reads `packages.json` as a list of `{name, version}` packages.
+2. Calls `POST /v1/querybatch` to get vulnerability IDs for each package/version.
+3. Fetches full details per vulnerability from `GET /v1/vulns/{id}`.
+4. Derives severity (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`).
+5. Persists raw findings to `scan-findings.json`.
+6. Deduplicates to one alert per `name@version` (highest severity vuln), and writes `deduped-alerts.json`.
+7. Sends Slack alerts from `deduped-alerts.json` and records sent keys in `cache.json`.
 
-Malicious packages (`MAL-` IDs) are flagged separately with instructions to remove and rotate secrets.
+Malicious packages (`MAL-` IDs) are flagged as `CRITICAL` with stronger remediation guidance.
+
+## Output artifacts
+
+- `scan-findings.json`: raw/enriched vulnerability findings collected during a run.
+- `deduped-alerts.json`: final one-alert-per-package payload used for Slack delivery.
+- `cache.json`: cooldown cache to avoid re-alerting identical package/version + selected vulnerability within the dedupe window.
 
 ## Setup
 
@@ -23,7 +31,7 @@ Malicious packages (`MAL-` IDs) are flagged separately with instructions to remo
 
 2. Install dependencies:
    ```bash
-   python -m venv .venv
+   python3 -m venv .venv
    .venv/bin/pip install requests schedule python-dotenv cvss
    ```
 
@@ -46,6 +54,13 @@ Malicious packages (`MAL-` IDs) are flagged separately with instructions to remo
 ```
 
 Works with npm, pnpm, bun, and yarn.
+
+## Alert semantics
+
+- Alerts are deduplicated per `package@version` for each run.
+- If a package/version has multiple vulnerabilities, only the highest-severity vulnerability is sent.
+- Alert includes `Vulns found: N` so you can see total vuln count behind the selected top issue.
+- If the same package appears in `packages.json` with different versions, each version can alert separately.
 
 ## Generate `packages.json` (npm/pnpm/yarn/bun)
 
@@ -73,13 +88,7 @@ Notes:
 - Bun uses `bun list --all` text output; parsing is best-effort based on `name@version` tokens.
 - npm/pnpm/yarn modes consume JSON output from their respective CLIs.
 
-## Test exporter across managers
+## Notes
 
-Run real integration tests (npm, pnpm, yarn, bun):
-
-```bash
-node tests/run-real-exporter-tests.mjs
-```
-
-This creates temporary installs from `tests/projects/*`, runs the exporter, and validates
-that output is exact-version `{name, version}` entries.
+- OSV `querybatch` does not return severity. Severity is derived only after fetching full vuln details.
+- Recommended upgrade is best-effort from available fixed versions in OSV data.
