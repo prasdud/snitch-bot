@@ -11,6 +11,7 @@ import json
 import os
 import time
 import math
+import re
 from datetime import datetime, timezone
 import schedule
 import requests
@@ -131,13 +132,69 @@ def find_safe_version(vuln):
     print(f"[snitch] {vuln['id']} → safe version: not found")
     return None
 
+
+def _severity_rank(severity):
+    normalized = (severity or "UNKNOWN").upper()
+    if normalized == "MODERATE":
+        normalized = "MEDIUM"
+    ranks = {
+        "UNKNOWN": 0,
+        "LOW": 1,
+        "MEDIUM": 2,
+        "HIGH": 3,
+        "CRITICAL": 4,
+    }
+    return ranks.get(normalized, 0)
+
+
+def _version_key(version):
+    parts = re.split(r"[.+\-]", version)
+    key = []
+    for part in parts:
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part))
+    return tuple(key)
+
+
+def _find_fix_all_version(items):
+    candidates = [item.get("safe_version") for item in items if item.get("safe_version")]
+    if not candidates:
+        return None
+    try:
+        return max(candidates, key=_version_key)
+    except Exception:
+        return None
+
+
 def clean_duplicate_vuln(vulns):
-    '''
-    take all vulns for all packages and return the highest severity vuln, one for each package.
-    also return a safe version that fixes all vulns
-    '''
-    pass
-    #return deduped_alerts
+    grouped = {}
+    for item in vulns:
+        package = item.get("package", {})
+        key = f"{package.get('name', '')}@{package.get('version', '')}"
+        grouped.setdefault(key, []).append(item)
+
+    deduped_alerts = []
+    for items in grouped.values():
+        selected = max(
+            items,
+            key=lambda i: (
+                _severity_rank(i.get("severity")),
+                i.get("vuln", {}).get("modified", ""),
+            ),
+        )
+        deduped_alerts.append(
+            {
+                "package": selected["package"],
+                "vuln": selected["vuln"],
+                "severity": selected["severity"],
+                "safe_version": _find_fix_all_version(items),
+                "vuln_count": len(items),
+            }
+        )
+
+    return deduped_alerts
 
 def load_cache():
     try:
@@ -172,6 +229,10 @@ def load_scan_findings():
 
 def save_scan_findings(scan_findings):
     FILE_SCAN_FINDINGS.write_text(json.dumps(scan_findings, indent=2, sort_keys=True))
+
+
+def save_deduped_alerts(deduped_alerts):
+    FILE_DEDUPED_ALERTS.write_text(json.dumps(deduped_alerts, indent=2, sort_keys=True))
 
 def cache_key(package, vuln_id):
     return f"{package['name']}@{package['version']}::{vuln_id}"
@@ -276,7 +337,7 @@ def send_scan_complete_summary(metrics):
     if not sent:
         print("[snitch] ERROR: Failed to send scan complete summary")
 
-def send_slack_alert(package, vuln, severity, safe_version):
+def send_slack_alert(package, vuln, severity, safe_version, vuln_count=None):
     is_mal = vuln.get("id", "").startswith("MAL-")
 
     emoji  = "🚨" if is_mal else "⚠️"
@@ -287,6 +348,11 @@ def send_slack_alert(package, vuln, severity, safe_version):
     message = (
         f"{emoji} *{'MALICIOUS PACKAGE' if is_mal else 'Vulnerability Detected'}*\n"
         f"*Package:* `{package['name']}@{package['version']}`\n"
+        f"*Vulns found:* {vuln_count}\n" if vuln_count is not None else
+        f"{emoji} *{'MALICIOUS PACKAGE' if is_mal else 'Vulnerability Detected'}*\n"
+        f"*Package:* `{package['name']}@{package['version']}`\n"
+    )
+    message += (
         f"*ID:* {vuln['id']}\n"
         f"*Summary:* {vuln.get('summary', 'N/A')}\n"
         f"*Severity:* {severity}\n"
@@ -312,7 +378,7 @@ def check():
     started_at = datetime.now(timezone.utc)
     cache = load_cache()
     packages = read_packages()
-    scan_findings = load_scan_findings()
+    scan_findings = []
     if not packages:
         print("[snitch] No packages to check, skipping.")
         return
@@ -322,7 +388,7 @@ def check():
         return
     osv_batch_calls = math.ceil(len(packages) / BATCH_SIZE)
     send_slack_alert.thread_ts = create_run_thread(len(packages))
-    total    = 0
+    total = 0
     skipped_total = 0
     failed_total = 0
     affected_packages = 0
@@ -348,21 +414,9 @@ def check():
 
         for vuln_id in vuln_ids:
             try:
-                key = cache_key(package, vuln_id)
-                if check_cache_for_duplicate(key, cache):
-                    print(f"[snitch] Duplicate alert skipped: {key}")
-                    skipped_total += 1
-                    continue
-
                 vuln         = get_full_details(vuln_id)
                 osv_detail_fetches += 1
                 severity     = derive_severity(vuln)
-                if severity in severity_counts:
-                    severity_counts[severity] += 1
-                elif severity == "MODERATE":
-                    severity_counts["MEDIUM"] += 1
-                else:
-                    severity_counts["UNKNOWN"] += 1
                 safe_version = find_safe_version(vuln)
                 package_scan_details = {
                     'package': package,
@@ -370,19 +424,42 @@ def check():
                     'severity': severity,
                     'safe_version': safe_version
                 }
-                sent = send_slack_alert(package, vuln, severity, safe_version)
-                if sent:
-                    total += 1
-                    mark_cache_sent(key, cache)
-                    scan_findings.append(package_scan_details)
-                else:
-                    failed_total += 1
+                scan_findings.append(package_scan_details)
                 time.sleep(0.2)
             except Exception as e:
                 print(f"[snitch] Error processing {vuln_id}: {e}")
                 failed_total += 1
 
     save_scan_findings(scan_findings)
+    deduped_alerts = clean_duplicate_vuln(scan_findings)
+    save_deduped_alerts(deduped_alerts)
+
+    for alert in deduped_alerts:
+        package = alert["package"]
+        vuln = alert["vuln"]
+        severity = alert["severity"]
+        safe_version = alert["safe_version"]
+        vuln_count = alert["vuln_count"]
+
+        key = cache_key(package, vuln["id"])
+        if check_cache_for_duplicate(key, cache):
+            print(f"[snitch] Duplicate alert skipped: {key}")
+            skipped_total += 1
+            continue
+
+        if severity in severity_counts:
+            severity_counts[severity] += 1
+        elif severity == "MODERATE":
+            severity_counts["MEDIUM"] += 1
+        else:
+            severity_counts["UNKNOWN"] += 1
+
+        sent = send_slack_alert(package, vuln, severity, safe_version, vuln_count=vuln_count)
+        if sent:
+            total += 1
+            mark_cache_sent(key, cache)
+        else:
+            failed_total += 1
 
     clean_packages = len(packages) - affected_packages
     metrics = {
