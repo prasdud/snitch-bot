@@ -30,6 +30,8 @@ SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
 PACKAGES_FILE = Path("packages.json")
 CACHE_FILE   = Path("cache.json")
+FILE_SCAN_FINDINGS = Path("scan-findings.json")
+FILE_DEDUPED_ALERTS = Path("deduped-alerts.json")
 BATCH_SIZE   = 500
 DEDUP_HOURS  = 24 * 7
 DRY_RUN       = "--dry-run" in sys.argv
@@ -129,6 +131,13 @@ def find_safe_version(vuln):
     print(f"[snitch] {vuln['id']} → safe version: not found")
     return None
 
+def clean_duplicate_vuln(vulns):
+    '''
+    take all vulns for all packages and return the highest severity vuln, one for each package.
+    also return a safe version that fixes all vulns
+    '''
+    pass
+    #return deduped_alerts
 
 def load_cache():
     try:
@@ -148,6 +157,21 @@ def load_cache():
 def save_cache(cache):
     CACHE_FILE.write_text(json.dumps(cache, indent=2, sort_keys=True))
 
+def load_save_findings():
+    try:
+        scan_findings = json.loads(FILE_SCAN_FINDINGS.read_text())
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"[snitch] ERROR: Failed to parse {FILE_SCAN_FINDINGS}: {e}")
+        return {}
+    if not isinstance(cache, dict):
+        print(f"[snitch] ERROR: Invalid {FILE_SCAN_FINDINGS} format.")
+        return {}
+    return FILE_SCAN_FINDINGS
+
+def save_scan_findings(scan_findings):
+    FILE_SCAN_FINDINGS.write_text(json.dumps(scan_findings, indent=2, sort_keys=True))
 
 def cache_key(package, vuln_id):
     return f"{package['name']}@{package['version']}::{vuln_id}"
@@ -288,6 +312,7 @@ def check():
     started_at = datetime.now(timezone.utc)
     cache = load_cache()
     packages = read_packages()
+    scan_findings = []
     if not packages:
         print("[snitch] No packages to check, skipping.")
         return
@@ -295,6 +320,9 @@ def check():
     if not results:
         print("[snitch] No results from OSV, skipping.")
         return
+    if os.path.exists('FILE_SCAN_FINDINGS'):
+        with open(FILE_SCAN_FINDINGS, 'r') as f:
+            scan_findings = json.load(f)
 
     osv_batch_calls = math.ceil(len(packages) / BATCH_SIZE)
     send_slack_alert.thread_ts = create_run_thread(len(packages))
@@ -340,17 +368,27 @@ def check():
                 else:
                     severity_counts["UNKNOWN"] += 1
                 safe_version = find_safe_version(vuln)
-                sent = send_slack_alert(package, vuln, severity, safe_version)
-                if sent:
+                package_scan_details = {
+                    'package': package,
+                    'vuln': vuln,
+                    'severity': severity,
+                    'safe_version': safe_version
+                }
+                #sent = send_slack_alert(package, vuln, severity, safe_version)
+                if package_scan_details:
                     total += 1
                     # if not DRY_RUN:
                     mark_cache_sent(key, cache)
+                    scan_findings.append(package_scan_details)
                 else:
                     failed_total += 1
                 time.sleep(0.2)
             except Exception as e:
                 print(f"[snitch] Error processing {vuln_id}: {e}")
                 failed_total += 1
+
+    with open(FILE_SCAN_FINDINGS, 'w') as f:
+        json.dumps(scan_findings, f, indent=2)
 
     clean_packages = len(packages) - affected_packages
     metrics = {
